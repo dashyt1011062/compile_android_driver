@@ -301,7 +301,7 @@ static void reset_fixed_target(void)
     target[22] = '\0';
 }
 
-static const char *request_name(unsigned long long request)
+static __maybe_unused const char *request_name(unsigned long long request)
 {
     switch (request) {
     case 0:
@@ -373,7 +373,7 @@ static const char *request_name(unsigned long long request)
     }
 }
 
-static const char *regset_name(unsigned long long regset)
+static __maybe_unused const char *regset_name(unsigned long long regset)
 {
     switch (regset) {
     case NT_ARM_HW_BREAK:
@@ -402,7 +402,7 @@ static int is_interesting_ptrace_unmatched(unsigned long long request, unsigned 
     return 0;
 }
 
-static const char *perf_ioctl_name(unsigned long long cmd)
+static __maybe_unused const char *perf_ioctl_name(unsigned long long cmd)
 {
     switch (cmd) {
     case PERF_EVENT_IOC_ENABLE:
