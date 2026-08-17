@@ -9,8 +9,8 @@ kade:
       flavor: "gki"                # gki | non_gki
 
     gki:
-      android_version: 14
-      kernel_version: "6.1"
+      android_version: 15
+      kernel_version: "6.6"
       target_arch: "aarch64"
 
       driver:
