@@ -6,6 +6,7 @@ ddk_module(
     name = "wujishadow",
     out = "wujishadow.ko",
     kernel_build = "@gki_prebuilts//kernel_aarch64",
+    deps = ["@kleaf//common:all_headers_aarch64"],
     srcs = [
         "shadow_ptrace_hwdebug.c",
         "wuji_hwbp.c",
