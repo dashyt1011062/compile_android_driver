@@ -1,0 +1,40 @@
+project:
+  name: "ci-kade-devkit"
+  plugin: "kade"
+  plugin_source: "../_kade-plugin-center/plugins/kade"
+
+kade:
+  config_overrides:
+    kernel:
+      flavor: "gki"
+
+    gki:
+      android_version: "${ANDROID_VERSION}"
+      kernel_version: "${KERNEL_VERSION}"
+      target_arch: "${TARGET_ARCH}"
+
+      driver:
+        project_name: "devkit_probe"
+        in_tree: false
+        external_src_dir: "${GITHUB_WORKSPACE}/devkit/probe"
+        module_name: "devkit_probe.ko"
+        overwrite: true
+
+      build:
+        bazel:
+          args: ["--config=fast"]
+
+abi:
+  upstream_patch: true
+  symbols_file: "${GITHUB_WORKSPACE}/abi.symbols"
+  sort: false
+  replace: false
+
+flow:
+  steps:
+    - "kade prepare"
+    - "kade deps"
+    - "kade sync"
+    - "kade abi_upstream"
+    - "kade build"
+  post_commands: []

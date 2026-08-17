@@ -1,0 +1,246 @@
+name: Build GKI development package matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Publish each completed package as a permanent release"
+        required: true
+        default: true
+        type: boolean
+      force_rebuild:
+        description: "Rebuild versions whose release assets already exist"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gki-development-package-matrix
+  cancel-in-progress: false
+
+jobs:
+  build-devkit:
+    name: Android ${{ matrix.android }} / Kernel ${{ matrix.kernel }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - android: 12
+            kernel: "5.4"
+            branch: common-android12-5.4
+            build_mode: legacy
+          - android: 13
+            kernel: "5.10"
+            branch: common-android13-5.10
+            build_mode: legacy
+          - android: 14
+            kernel: "5.15"
+            branch: common-android14-5.15
+            build_mode: kleaf
+          - android: 14
+            kernel: "6.1"
+            branch: common-android14-6.1
+            build_mode: kleaf
+          - android: 15
+            kernel: "6.6"
+            branch: common-android15-6.6
+            build_mode: kleaf
+          - android: 16
+            kernel: "6.12"
+            branch: common-android16-6.12
+            build_mode: kleaf
+          - android: 17
+            kernel: "6.18"
+            branch: common-android17-6.18
+            build_mode: kleaf
+
+    env:
+      ANDROID_VERSION: ${{ matrix.android }}
+      KERNEL_VERSION: ${{ matrix.kernel }}
+      TARGET_ARCH: aarch64
+      MANIFEST_BRANCH: ${{ matrix.branch }}
+      BUILD_MODE: ${{ matrix.build_mode }}
+      PACKAGE_NAME: android${{ matrix.android }}-${{ matrix.kernel }}-aarch64-devkit
+      RELEASE_TAG: android${{ matrix.android }}-${{ matrix.kernel }}-aarch64-devkit
+      LYENV_HOME: ${{ github.workspace }}/.lyenv_home
+      DEVKIT_OUTPUT: ${{ github.workspace }}/.devkit-output
+      DEVKIT_ARCHIVE: ${{ github.workspace }}/.devkit-output/android${{ matrix.android }}-${{ matrix.kernel }}-aarch64-devkit.tar.zst
+      DEVKIT_CHECKSUM: ${{ github.workspace }}/.devkit-output/android${{ matrix.android }}-${{ matrix.kernel }}-aarch64-devkit.tar.zst.sha256
+      KADE_LOG: ${{ github.workspace }}/kadeflow-android${{ matrix.android }}-${{ matrix.kernel }}.log
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Reuse an existing complete release
+        id: existing-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          skip=false
+          if [[ "${{ inputs.force_rebuild }}" != "true" ]] && \
+             gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            assets=$(gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name')
+            if grep -Fxq "${PACKAGE_NAME}.tar.zst" <<<"${assets}" && \
+               grep -Fxq "${PACKAGE_NAME}.tar.zst.sha256" <<<"${assets}"; then
+              skip=true
+              echo "Release ${RELEASE_TAG} already has both package assets."
+            fi
+          fi
+          echo "skip=${skip}" >> "${GITHUB_OUTPUT}"
+
+      - name: Free runner disk space
+        if: steps.existing-release.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -eux
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet /opt/hostedtoolcache/CodeQL
+          df -h "${GITHUB_WORKSPACE}"
+
+      - name: Setup Python
+        if: steps.existing-release.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install bootstrap dependencies
+        if: steps.existing-release.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y make git curl python3 python3-pip zstd
+
+      - name: Checkout pinned kade plugin
+        if: steps.existing-release.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: systemnb/lyenv-plugin-center
+          ref: f24571af839a32f360593d13676336a4132b4966
+          path: _kade-plugin-center
+          sparse-checkout: |
+            plugins/kade
+          sparse-checkout-cone: true
+
+      - name: Restore version-specific build caches
+        if: steps.existing-release.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.LYENV_HOME }}/cache
+            ${{ env.LYENV_HOME }}/ccache
+            ${{ env.LYENV_HOME }}/bazel-cache
+          key: gki-devkit-${{ matrix.branch }}-${{ runner.os }}-${{ hashFiles('kadeflow-devkit-matrix.yaml', 'abi.symbols') }}
+          restore-keys: |
+            gki-devkit-${{ matrix.branch }}-${{ runner.os }}-
+
+      - name: Install pinned lyenv
+        if: steps.existing-release.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -eux
+          mkdir -p "${LYENV_HOME}"
+          git clone https://github.com/systemnb/lyenv "${GITHUB_WORKSPACE}/_lyenv"
+          git -C "${GITHUB_WORKSPACE}/_lyenv" checkout 04c61940f19cc7912c2bd3df7d584352a9e19d3f
+          make -C "${GITHUB_WORKSPACE}/_lyenv" install
+
+      - name: Create kade project
+        if: steps.existing-release.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -eux
+          lyenv create ci-kade-devkit
+          cd ci-kade-devkit
+          lyenv init .
+          eval "$(lyenv activate)"
+          which lyenv
+
+      - name: Build GKI and validation module
+        if: steps.existing-release.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -eux
+          python3 -m pip install --user pyyaml
+          cd "${GITHUB_WORKSPACE}/ci-kade-devkit"
+          eval "$(lyenv activate)"
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/run_kadeflow.py" \
+            --config "${GITHUB_WORKSPACE}/kadeflow-devkit-matrix.yaml" \
+            --debug \
+            --log-file "${KADE_LOG}"
+
+      - name: Package development files
+        if: steps.existing-release.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -eux
+          bash "${GITHUB_WORKSPACE}/.github/scripts/package_kernel_devkit.sh" \
+            "${GITHUB_WORKSPACE}/ci-kade-devkit/workspace/android-kernel" \
+            "${DEVKIT_OUTPUT}" \
+            "${ANDROID_VERSION}" \
+            "${KERNEL_VERSION}" \
+            "${TARGET_ARCH}"
+          test -s "${DEVKIT_ARCHIVE}"
+          test -s "${DEVKIT_CHECKSUM}"
+
+      - name: Publish permanent release
+        if: ${{ steps.existing-release.outputs.skip != 'true' && inputs.publish_release }}
+        shell: bash
+        run: |
+          set -eux
+          notes="GKI development package built from ${MANIFEST_BRANCH}. Build mode: ${BUILD_MODE}. Package format is recorded in BUILD_INFO.txt inside the archive."
+          if ! gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release create "${RELEASE_TAG}" \
+              --target "${GITHUB_SHA}" \
+              --title "Android ${ANDROID_VERSION} Kernel ${KERNEL_VERSION} AArch64 development package" \
+              --notes "${notes}"
+          fi
+          gh release upload "${RELEASE_TAG}" \
+            "${DEVKIT_ARCHIVE}" \
+            "${DEVKIT_CHECKSUM}" \
+            --clobber
+          gh release view "${RELEASE_TAG}" --json assets \
+            --jq '.assets[] | [.name, .size] | @tsv'
+
+      - name: Upload package when release publishing is disabled
+        if: ${{ steps.existing-release.outputs.skip != 'true' && !inputs.publish_release }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}
+          path: |
+            ${{ env.DEVKIT_ARCHIVE }}
+            ${{ env.DEVKIT_CHECKSUM }}
+            ${{ env.KADE_LOG }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload build records
+        if: ${{ steps.existing-release.outputs.skip != 'true' && success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}-records
+          path: |
+            ${{ env.DEVKIT_OUTPUT }}/${{ env.PACKAGE_NAME }}/BUILD_INFO.txt
+            ${{ env.DEVKIT_OUTPUT }}/${{ env.PACKAGE_NAME }}/README.md
+            ${{ env.DEVKIT_OUTPUT }}/${{ env.PACKAGE_NAME }}/manifest.xml
+            ${{ env.DEVKIT_CHECKSUM }}
+            ${{ env.KADE_LOG }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}-failure-log
+          path: ${{ env.KADE_LOG }}
+          if-no-files-found: warn
+          retention-days: 30
