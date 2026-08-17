@@ -5,14 +5,14 @@
 wujishadow_kallsyms_lookup_name_t ws_kallsyms_lookup_name;
 
 typedef long (*ws_syscall_fn_t)(const struct pt_regs *regs);
-typedef void (*ws_step_fn_t)(struct perf_event *event,
-                             struct perf_sample_data *data,
-                             struct pt_regs *regs);
+typedef int (*ws_step_fn_t)(unsigned long unused, unsigned long esr,
+                            struct pt_regs *regs);
 
 struct ws_hook_entry {
     int used;
     int compat;
     int nr;
+    int narg;
     unsigned long target;
     void *wrapper;
     void *before;
@@ -80,6 +80,17 @@ static const char *ws_syscall_symbol(int nr, int compat)
     }
 }
 
+static void ws_call_callback(struct ws_hook_entry *entry, void *callback,
+                             hook_fargs8_t *args)
+{
+    if (!callback)
+        return;
+    if (entry->narg > 4)
+        ((hook_callback8_t)callback)(args, entry->udata);
+    else
+        ((hook_callback4_t)callback)((hook_fargs4_t *)args, entry->udata);
+}
+
 static long ws_call_syscall(struct ws_hook_entry *entry,
                             const struct pt_regs *regs)
 {
@@ -91,14 +102,12 @@ static long ws_call_syscall(struct ws_hook_entry *entry,
     args.arg0 = (uint64_t)(uintptr_t)regs;
     origin = (ws_syscall_fn_t)(uintptr_t)entry->target;
 
-    if (entry->before)
-        ((hook_callback_t)entry->before)(&args, entry->udata);
+    ws_call_callback(entry, entry->before, &args);
 
     if (!args.skip_origin)
         args.ret = (uint64_t)origin(regs);
 
-    if (entry->after)
-        ((hook_callback_t)entry->after)(&args, entry->udata);
+    ws_call_callback(entry, entry->after, &args);
 
     ret = (long)args.ret;
     return ret;
@@ -200,13 +209,15 @@ static struct ws_hook_entry *ws_find_entry(int nr, int compat,
     return NULL;
 }
 
-static hook_err_t ws_hook_syscall(int nr, int compat, void *before,
-                                  void *after, void *udata)
+static hook_err_t ws_hook_syscall(int nr, int compat, int narg,
+                                  void *before, void *after, void *udata)
 {
     struct ws_hook_entry *entry;
     const char *symbol;
     int index;
 
+    if (narg < 1 || narg > 8)
+        return HOOK_BAD_ADDRESS;
     if (ws_find_entry(nr, compat, before, after))
         return HOOK_DUPLICATED;
     index = ws_hook_index(nr, compat);
@@ -219,6 +230,7 @@ static hook_err_t ws_hook_syscall(int nr, int compat, void *before,
     memset(entry, 0, sizeof(*entry));
     entry->nr = nr;
     entry->compat = compat;
+    entry->narg = narg;
     entry->before = before;
     entry->after = after;
     entry->udata = udata;
@@ -232,8 +244,7 @@ static hook_err_t ws_hook_syscall(int nr, int compat, void *before,
 hook_err_t hook_syscalln(int nr, int narg, void *before, void *after,
                          void *udata)
 {
-    (void)narg;
-    return ws_hook_syscall(nr, 0, before, after, udata);
+    return ws_hook_syscall(nr, 0, narg, before, after, udata);
 }
 
 void unhook_syscalln(int nr, void *before, void *after)
@@ -245,8 +256,7 @@ void unhook_syscalln(int nr, void *before, void *after)
 hook_err_t hook_compat_syscalln(int nr, int narg, void *before, void *after,
                                 void *udata)
 {
-    (void)narg;
-    return ws_hook_syscall(nr, 1, before, after, udata);
+    return ws_hook_syscall(nr, 1, narg, before, after, udata);
 }
 
 void unhook_compat_syscalln(int nr, void *before, void *after)
@@ -255,32 +265,30 @@ void unhook_compat_syscalln(int nr, void *before, void *after)
     ws_remove_kprobe(entry);
 }
 
-static void ws_step_dispatch(struct ws_hook_entry *entry,
-                             struct perf_event *event,
-                             struct perf_sample_data *data,
-                             struct pt_regs *regs)
+static int ws_step_dispatch(struct ws_hook_entry *entry, unsigned long unused,
+                            unsigned long esr, struct pt_regs *regs)
 {
     hook_fargs4_t args;
     ws_step_fn_t origin;
 
     memset(&args, 0, sizeof(args));
-    args.arg0 = (uint64_t)(uintptr_t)event;
-    args.arg1 = (uint64_t)(uintptr_t)data;
+    args.arg0 = (uint64_t)unused;
+    args.arg1 = (uint64_t)esr;
     args.arg2 = (uint64_t)(uintptr_t)regs;
     origin = (ws_step_fn_t)(uintptr_t)entry->target;
     if (entry->before)
-        ((hook_callback_t)entry->before)(&args, entry->udata);
+        ((hook_callback4_t)entry->before)(&args, entry->udata);
     if (!args.skip_origin)
-        origin(event, data, regs);
+        args.ret = (uint64_t)origin(unused, esr, regs);
     if (entry->after)
-        ((hook_callback_t)entry->after)(&args, entry->udata);
+        ((hook_callback4_t)entry->after)(&args, entry->udata);
+    return (int)args.ret;
 }
 
-static void ws_step_wrapper(struct perf_event *event,
-                            struct perf_sample_data *data,
-                            struct pt_regs *regs)
+static int ws_step_wrapper(unsigned long unused, unsigned long esr,
+                           struct pt_regs *regs)
 {
-    ws_step_dispatch(&ws_step_hook, event, data, regs);
+    return ws_step_dispatch(&ws_step_hook, unused, esr, regs);
 }
 
 hook_err_t hook_wrap3(void *target, void *before, void *after, void *udata)
@@ -290,6 +298,7 @@ hook_err_t hook_wrap3(void *target, void *before, void *after, void *udata)
     memset(&ws_step_hook, 0, sizeof(ws_step_hook));
     ws_step_hook.target = (unsigned long)target;
     ws_step_hook.wrapper = ws_step_wrapper;
+    ws_step_hook.narg = 3;
     ws_step_hook.before = before;
     ws_step_hook.after = after;
     ws_step_hook.udata = udata;

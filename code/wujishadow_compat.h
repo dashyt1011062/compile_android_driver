@@ -122,7 +122,8 @@ static inline int compat_copy_to_user(void __user *to, const void *from,
     return copy_to_user(to, from, size) ? -EFAULT : 0;
 }
 
-typedef void (*hook_callback_t)(void *fargs, void *udata);
+typedef void (*hook_callback4_t)(hook_fargs4_t *fargs, void *udata);
+typedef void (*hook_callback8_t)(hook_fargs8_t *fargs, void *udata);
 
 hook_err_t hook_syscalln(int nr, int narg, void *before, void *after,
                          void *udata);
