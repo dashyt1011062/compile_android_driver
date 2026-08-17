@@ -3204,14 +3204,23 @@ static int build_status_reply(char *reply, size_t reply_size)
 
 static long status(char *__user out_msg, int outlen)
 {
-    char reply[2048];
+    char *reply;
+    long ret;
     int len;
 
-    len = build_status_reply(reply, sizeof(reply));
-    if (len < 0) {
-        return len;
+    reply = kmalloc(2048, GFP_KERNEL);
+    if (!reply) {
+        return -ENOMEM;
     }
-    return copy_reply(out_msg, outlen, reply);
+
+    len = build_status_reply(reply, 2048);
+    if (len < 0) {
+        ret = len;
+    } else {
+        ret = copy_reply(out_msg, outlen, reply);
+    }
+    kfree(reply);
+    return ret;
 }
 
 long wuji_hwbp_init(const char *args, const char *event, void *__user reserved)

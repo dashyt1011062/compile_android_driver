@@ -38,6 +38,26 @@
 #define WAIT_WNOHANG 1
 #define WAIT_STOPPED_SIGSTOP 0x137f
 
+/* arm64 does not expose these legacy requests in its kernel UAPI headers. */
+#ifndef PTRACE_PEEKUSER
+#define PTRACE_PEEKUSER 3
+#endif
+#ifndef PTRACE_POKEUSER
+#define PTRACE_POKEUSER 6
+#endif
+#ifndef PTRACE_GETREGS
+#define PTRACE_GETREGS 12
+#endif
+#ifndef PTRACE_SETREGS
+#define PTRACE_SETREGS 13
+#endif
+#ifndef PTRACE_GETFPREGS
+#define PTRACE_GETFPREGS 14
+#endif
+#ifndef PTRACE_SETFPREGS
+#define PTRACE_SETFPREGS 15
+#endif
+
 
 struct user_iovec64
 {
