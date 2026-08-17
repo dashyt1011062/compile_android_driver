@@ -2,6 +2,12 @@
 
 #include "wujishadow_compat.h"
 
+static const struct {
+    int pgd_offset;
+} mm_struct_offset = {
+    .pgd_offset = offsetof(struct mm_struct, pgd),
+};
+
 #define COMBINED_SILENT_LOG(...) do { } while (0)
 
 #define WUJI_HWBP_MAX 8

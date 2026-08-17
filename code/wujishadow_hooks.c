@@ -18,58 +18,40 @@ struct ws_hook_entry {
     void *before;
     void *after;
     void *udata;
-    struct ftrace_ops ops;
+    struct kprobe probe;
 };
 
 static struct ws_hook_entry ws_hooks[16];
 static struct ws_hook_entry ws_step_hook;
 
-typedef int (*ws_ftrace_set_filter_ip_t)(struct ftrace_ops *ops,
-                                         unsigned long ip, int remove,
-                                         int reset);
-typedef int (*ws_register_ftrace_function_t)(struct ftrace_ops *ops);
-typedef int (*ws_unregister_ftrace_function_t)(struct ftrace_ops *ops);
-
-static ws_ftrace_set_filter_ip_t ws_ftrace_set_filter_ip;
-static ws_register_ftrace_function_t ws_register_ftrace_function;
-static ws_unregister_ftrace_function_t ws_unregister_ftrace_function;
-
-static int ws_resolve_ftrace(void)
+static struct ws_hook_entry *ws_entry_from_probe(struct kprobe *probe)
 {
-    if (ws_ftrace_set_filter_ip && ws_register_ftrace_function &&
-        ws_unregister_ftrace_function)
-        return 0;
-    if (!kallsyms_lookup_name)
-        return -ENOSYS;
-    ws_ftrace_set_filter_ip = (ws_ftrace_set_filter_ip_t)
-        kallsyms_lookup_name("ftrace_set_filter_ip");
-    ws_register_ftrace_function = (ws_register_ftrace_function_t)
-        kallsyms_lookup_name("register_ftrace_function");
-    ws_unregister_ftrace_function = (ws_unregister_ftrace_function_t)
-        kallsyms_lookup_name("unregister_ftrace_function");
-    return ws_ftrace_set_filter_ip && ws_register_ftrace_function &&
-           ws_unregister_ftrace_function ? 0 : -ENOSYS;
-}
-
-static struct ws_hook_entry *ws_entry_from_ops(struct ftrace_ops *ops)
-{
-    if (ops == &ws_step_hook.ops)
+    if (probe == &ws_step_hook.probe)
         return &ws_step_hook;
-    return container_of(ops, struct ws_hook_entry, ops);
+    return container_of(probe, struct ws_hook_entry, probe);
 }
 
-static void notrace ws_ftrace_thunk(unsigned long ip, unsigned long parent_ip,
-                                    struct ftrace_ops *ops,
-                                    struct ftrace_regs *fregs)
+static int ws_kprobe_pre_handler(struct kprobe *probe, struct pt_regs *regs)
 {
-    struct ws_hook_entry *entry = ws_entry_from_ops(ops);
+    struct ws_hook_entry *entry = ws_entry_from_probe(probe);
+    unsigned long parent_ip = procedure_link_pointer(regs);
 
-    (void)ip;
     if (!entry || !entry->used || within_module(parent_ip, THIS_MODULE))
-        return;
-    ftrace_regs_set_instruction_pointer(fregs,
-                                        (unsigned long)entry->wrapper);
+        return 0;
+    instruction_pointer_set(regs, (unsigned long)entry->wrapper);
+    return 1;
 }
+NOKPROBE_SYMBOL(ws_kprobe_pre_handler);
+
+static void ws_kprobe_post_handler(struct kprobe *probe,
+                                   struct pt_regs *regs,
+                                   unsigned long flags)
+{
+    (void)probe;
+    (void)regs;
+    (void)flags;
+}
+NOKPROBE_SYMBOL(ws_kprobe_post_handler);
 
 static const char *ws_syscall_symbol(int nr, int compat)
 {
@@ -180,36 +162,27 @@ static int ws_hook_index(int nr, int compat)
     }
 }
 
-static hook_err_t ws_install_ftrace(struct ws_hook_entry *entry)
+static hook_err_t ws_install_kprobe(struct ws_hook_entry *entry)
 {
     int ret;
 
-    ret = ws_resolve_ftrace();
+    entry->probe.addr = (kprobe_opcode_t *)(uintptr_t)entry->target;
+    entry->probe.pre_handler = ws_kprobe_pre_handler;
+    /* A post handler prevents Kprobe optimization from bypassing PC changes. */
+    entry->probe.post_handler = ws_kprobe_post_handler;
+    ret = register_kprobe(&entry->probe);
     if (ret)
         return HOOK_BAD_ADDRESS;
-
-    entry->ops.func = ws_ftrace_thunk;
-    entry->ops.flags = FTRACE_OPS_FL_SAVE_REGS |
-                       FTRACE_OPS_FL_RECURSION |
-                       FTRACE_OPS_FL_IPMODIFY;
-    ret = ws_ftrace_set_filter_ip(&entry->ops, entry->target, 0, 0);
-    if (ret)
-        return HOOK_BAD_ADDRESS;
-    ret = ws_register_ftrace_function(&entry->ops);
-    if (ret) {
-        ws_ftrace_set_filter_ip(&entry->ops, entry->target, 1, 0);
-        return HOOK_BAD_ADDRESS;
-    }
     entry->used = 1;
     return HOOK_NO_ERR;
 }
 
-static void ws_remove_ftrace(struct ws_hook_entry *entry)
+static void ws_remove_kprobe(struct ws_hook_entry *entry)
 {
     if (!entry || !entry->used)
         return;
-    ws_unregister_ftrace_function(&entry->ops);
-    ws_ftrace_set_filter_ip(&entry->ops, entry->target, 1, 0);
+    entry->used = 0;
+    unregister_kprobe(&entry->probe);
     memset(entry, 0, sizeof(*entry));
 }
 
@@ -253,7 +226,7 @@ static hook_err_t ws_hook_syscall(int nr, int compat, void *before,
     entry->target = kallsyms_lookup_name(symbol);
     if (!entry->target)
         return HOOK_BAD_ADDRESS;
-    return ws_install_ftrace(entry);
+    return ws_install_kprobe(entry);
 }
 
 hook_err_t hook_syscalln(int nr, int narg, void *before, void *after,
@@ -266,7 +239,7 @@ hook_err_t hook_syscalln(int nr, int narg, void *before, void *after,
 void unhook_syscalln(int nr, void *before, void *after)
 {
     struct ws_hook_entry *entry = ws_find_entry(nr, 0, before, after);
-    ws_remove_ftrace(entry);
+    ws_remove_kprobe(entry);
 }
 
 hook_err_t hook_compat_syscalln(int nr, int narg, void *before, void *after,
@@ -279,7 +252,7 @@ hook_err_t hook_compat_syscalln(int nr, int narg, void *before, void *after,
 void unhook_compat_syscalln(int nr, void *before, void *after)
 {
     struct ws_hook_entry *entry = ws_find_entry(nr, 1, before, after);
-    ws_remove_ftrace(entry);
+    ws_remove_kprobe(entry);
 }
 
 static void ws_step_dispatch(struct ws_hook_entry *entry,
@@ -320,14 +293,14 @@ hook_err_t hook_wrap3(void *target, void *before, void *after, void *udata)
     ws_step_hook.before = before;
     ws_step_hook.after = after;
     ws_step_hook.udata = udata;
-    return ws_install_ftrace(&ws_step_hook);
+    return ws_install_kprobe(&ws_step_hook);
 }
 
 void hook_unwrap(void *target, void *before, void *after)
 {
     if (ws_step_hook.used && ws_step_hook.target == (unsigned long)target &&
         ws_step_hook.before == before && ws_step_hook.after == after)
-        ws_remove_ftrace(&ws_step_hook);
+        ws_remove_kprobe(&ws_step_hook);
 }
 
 void wujishadow_remove_all_hooks(void)
@@ -335,8 +308,8 @@ void wujishadow_remove_all_hooks(void)
     int i;
 
     for (i = 0; i < ARRAY_SIZE(ws_hooks); ++i)
-        ws_remove_ftrace(&ws_hooks[i]);
-    ws_remove_ftrace(&ws_step_hook);
+        ws_remove_kprobe(&ws_hooks[i]);
+    ws_remove_kprobe(&ws_step_hook);
 }
 
 int wujishadow_resolve_kallsyms(void)

@@ -28,51 +28,6 @@
 #define UNMATCHED_LOG_LIMIT 128
 #define UNMATCHED_INTERESTING_LOG_LIMIT 512
 
-#define PTRACE_ATTACH 0x10
-#define PTRACE_DETACH 0x11
-#define PTRACE_PEEKTEXT 1
-#define PTRACE_PEEKDATA 2
-#define PTRACE_PEEKUSER 3
-#define PTRACE_POKETEXT 4
-#define PTRACE_POKEDATA 5
-#define PTRACE_POKEUSER 6
-#define PTRACE_CONT 7
-#define PTRACE_KILL 8
-#define PTRACE_SINGLESTEP 9
-#define PTRACE_GETREGS 12
-#define PTRACE_SETREGS 13
-#define PTRACE_GETFPREGS 14
-#define PTRACE_SETFPREGS 15
-#define PTRACE_SYSCALL 24
-#define PTRACE_SETOPTIONS 0x4200
-#define PTRACE_GETEVENTMSG 0x4201
-#define PTRACE_GETSIGINFO 0x4202
-#define PTRACE_SETSIGINFO 0x4203
-#define PTRACE_GETREGSET 0x4204
-#define PTRACE_SETREGSET 0x4205
-#define PTRACE_SEIZE 0x4206
-#define PTRACE_INTERRUPT 0x4207
-#define PTRACE_LISTEN 0x4208
-#define PTRACE_PEEKSIGINFO 0x4209
-#define PTRACE_GETSIGMASK 0x420a
-#define PTRACE_SETSIGMASK 0x420b
-#define PTRACE_SECCOMP_GET_FILTER 0x420c
-#define PTRACE_SECCOMP_GET_METADATA 0x420d
-#define PTRACE_GET_SYSCALL_INFO 0x420e
-#define PERF_TYPE_BREAKPOINT 5
-#define PERF_EVENT_IOC_ENABLE 0x2400
-#define PERF_EVENT_IOC_DISABLE 0x2401
-#define PERF_EVENT_IOC_REFRESH 0x2402
-#define PERF_EVENT_IOC_RESET 0x2403
-#define PERF_EVENT_IOC_PERIOD 0x40082404ULL
-#define PERF_EVENT_IOC_SET_OUTPUT 0x2405
-#define PERF_EVENT_IOC_SET_FILTER 0x40082406ULL
-#define PERF_EVENT_IOC_ID 0x80082407ULL
-#define PERF_EVENT_IOC_SET_BPF 0x40042408ULL
-#define PERF_EVENT_IOC_PAUSE_OUTPUT 0x40042409ULL
-#define PERF_EVENT_IOC_QUERY_BPF 0xc008240aULL
-#define PERF_EVENT_IOC_MODIFY_ATTRIBUTES 0x4008240bULL
-
 #define NT_ARM_HW_BREAK 0x402
 #define NT_ARM_HW_WATCH 0x403
 
@@ -290,7 +245,7 @@ static void sanitize_log_string(char *s)
     }
 }
 
-static const char *skip_spaces(const char *s)
+static const char *shadow_skip_spaces(const char *s)
 {
     if (!s) return "";
     while (local_is_space(*s)) s++;
@@ -720,13 +675,15 @@ static void log_hwdebug_slots(pid_t tracer_pid, pid_t target_pid, int regset, co
 static void read_current_identity(char *comm, int comm_len, char *cmdline, int cmdline_len)
 {
     struct task_struct *task = current;
+    char task_comm[TASK_COMM_LEN];
     int copied;
 
     local_copy(comm, comm_len, "");
     local_copy(cmdline, cmdline_len, "");
     if (!task) return;
 
-    local_copy(comm, comm_len, get_task_comm(task));
+    get_task_comm(task_comm, task);
+    local_copy(comm, comm_len, task_comm);
 
     if (!get_cmdline_fn || cmdline_len <= 0) return;
     copied = get_cmdline_fn(task, cmdline, cmdline_len - 1);
@@ -1056,6 +1013,8 @@ static void before_ptrace(hook_fargs4_t *args, void *udata)
     pid_t target_pid;
     int compat = udata != 0;
 
+    (void)compat;
+
     ptrace_seen++;
     if (!current_matches_target(comm, sizeof(comm), cmdline, sizeof(cmdline))) {
         unsigned long long regset = syscall_argn(args, 2);
@@ -1344,6 +1303,7 @@ static void before_perf_event_open(hook_fargs5_t *args, void *udata)
     int is_breakpoint = 0;
     int compat = udata != 0;
 
+    (void)compat;
     perf_seen++;
     if (!current_matches_target(comm, sizeof(comm), cmdline, sizeof(cmdline))) {
         pid = current_pid();
@@ -1435,6 +1395,7 @@ static void before_ioctl(hook_fargs3_t *args, void *udata)
     unsigned long long cmd = syscall_argn(args, 1);
 
     (void)udata;
+    (void)cmd;
     state = find_perf_fd(tgid, fd);
     if (!state) return;
 
@@ -1805,7 +1766,7 @@ long shadow_control(const char *args, char *__user out_msg, int outlen)
 {
     char msg[1024];
     int len = 0;
-    const char *cmd = skip_spaces(args);
+    const char *cmd = shadow_skip_spaces(args);
 
     msg[0] = '\0';
     if (!cmd[0] || local_streq(cmd, "status")) {
