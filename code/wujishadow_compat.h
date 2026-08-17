@@ -27,7 +27,6 @@
 #include <linux/uaccess.h>
 #include <linux/uio.h>
 #include <linux/version.h>
-#include <asm/current.h>
 #include <asm/ptrace.h>
 #include <asm/unistd.h>
 
@@ -37,10 +36,6 @@ typedef __u32 uint32_t;
 typedef __u64 uint64_t;
 typedef __s32 int32_t;
 typedef __s64 int64_t;
-
-#ifndef get_current
-#define get_current() (current)
-#endif
 
 /* KPM exposes kallsyms_lookup_name to its payloads rather than to modules.
  * The module entry point initializes this pointer through a kprobe lookup. */
