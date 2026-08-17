@@ -2,7 +2,15 @@
 
 #include "wujishadow_compat.h"
 
-#define COMBINED_SILENT_LOG(...) do { } while (0)
+static bool shadow_log_enabled = true;
+module_param_named(shadow_log, shadow_log_enabled, bool, 0600);
+MODULE_PARM_DESC(shadow_log, "Enable rate-limited ShadowPtrace event logging");
+
+#define COMBINED_SILENT_LOG(...)                 \
+    do {                                         \
+        if (shadow_log_enabled)                  \
+            pr_info_ratelimited(__VA_ARGS__);    \
+    } while (0)
 
 #define COMPAT_NR_PTRACE 26
 #define COMPAT_NR_PERF_EVENT_OPEN 364
