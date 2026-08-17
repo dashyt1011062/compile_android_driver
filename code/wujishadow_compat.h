@@ -125,6 +125,9 @@ static inline int compat_copy_to_user(void __user *to, const void *from,
 typedef void (*hook_callback4_t)(hook_fargs4_t *fargs, void *udata);
 typedef void (*hook_callback8_t)(hook_fargs8_t *fargs, void *udata);
 
+bool shadow_syscall_should_intercept(int nr, int compat,
+                                     const struct pt_regs *regs);
+
 hook_err_t hook_syscalln(int nr, int narg, void *before, void *after,
                          void *udata);
 void unhook_syscalln(int nr, void *before, void *after);

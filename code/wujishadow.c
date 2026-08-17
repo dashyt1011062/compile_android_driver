@@ -175,5 +175,5 @@ module_exit(wujishadow_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("dashyt1011062");
-MODULE_VERSION("1.1.0-ko1");
+MODULE_VERSION("1.1.1-ko1");
 MODULE_DESCRIPTION("WuJi hardware breakpoints and shadow ptrace hwdebug virtualization");

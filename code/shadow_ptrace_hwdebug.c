@@ -170,6 +170,7 @@ static struct status_fd_state status_fds[STATUS_FD_SLOTS];
 static struct status_open_pending status_open_pending[STATUS_OPEN_SLOTS];
 static unsigned int status_open_next;
 static int status_fd_active_count;
+static pid_t target_tgid_hint;
 
 static unsigned long long log_seq;
 static unsigned long long ptrace_seen;
@@ -199,6 +200,7 @@ static pid_t (*task_pid_nr_ns_fn)(struct task_struct *task, enum pid_type type, 
 static int (*get_cmdline_fn)(struct task_struct *task, char *buffer, int buflen);
 extern int wuji_copy_current_user_phys(uint64_t addr, void *buf, size_t size,
                                        int write);
+static struct status_fd_state *find_status_fd(pid_t owner_tgid, int fd);
 
 static int local_is_space(char c)
 {
@@ -580,18 +582,22 @@ static struct ptrace_session *find_session(pid_t target_pid, int create)
     int free_idx = -1;
 
     for (i = 0; i < SESSION_SLOTS; i++) {
-        if (sessions[i].valid && sessions[i].target_pid == target_pid) return &sessions[i];
-        if (!sessions[i].valid && free_idx < 0) free_idx = i;
+        if (smp_load_acquire(&sessions[i].valid) &&
+            READ_ONCE(sessions[i].target_pid) == target_pid)
+            return &sessions[i];
+        if (!READ_ONCE(sessions[i].valid) && free_idx < 0)
+            free_idx = i;
     }
 
     if (!create || free_idx < 0) return 0;
 
-    sessions[free_idx].valid = 1;
+    smp_store_release(&sessions[free_idx].valid, 0);
     sessions[free_idx].target_pid = target_pid;
     sessions[free_idx].tracer_pid = 0;
     sessions[free_idx].attached = 0;
     sessions[free_idx].completed = 0;
     sessions[free_idx].wait_reported = 0;
+    smp_store_release(&sessions[free_idx].valid, 1);
     return &sessions[free_idx];
 }
 
@@ -600,7 +606,10 @@ static struct ptrace_session *find_wait_session(pid_t tracer_pid, pid_t wait_pid
     int i;
 
     for (i = 0; i < SESSION_SLOTS; i++) {
-        if (!sessions[i].valid || !sessions[i].attached || sessions[i].tracer_pid != tracer_pid) continue;
+        if (!smp_load_acquire(&sessions[i].valid) ||
+            !READ_ONCE(sessions[i].attached) ||
+            READ_ONCE(sessions[i].tracer_pid) != tracer_pid)
+            continue;
         if (wait_pid > 0 && sessions[i].target_pid != wait_pid) continue;
         return &sessions[i];
     }
@@ -611,7 +620,8 @@ static void clear_all_sessions(void)
 {
     int i;
 
-    for (i = 0; i < SESSION_SLOTS; i++) sessions[i].valid = 0;
+    for (i = 0; i < SESSION_SLOTS; i++)
+        smp_store_release(&sessions[i].valid, 0);
 }
 
 static void clear_session_target(pid_t target_pid)
@@ -619,7 +629,9 @@ static void clear_session_target(pid_t target_pid)
     int i;
 
     for (i = 0; i < SESSION_SLOTS; i++) {
-        if (sessions[i].valid && sessions[i].target_pid == target_pid) sessions[i].valid = 0;
+        if (smp_load_acquire(&sessions[i].valid) &&
+            READ_ONCE(sessions[i].target_pid) == target_pid)
+            smp_store_release(&sessions[i].valid, 0);
     }
 }
 
@@ -627,7 +639,8 @@ static void clear_all_perf_fds(void)
 {
     int i;
 
-    for (i = 0; i < PERF_FD_SLOTS; i++) perf_fds[i].valid = 0;
+    for (i = 0; i < PERF_FD_SLOTS; i++)
+        smp_store_release(&perf_fds[i].valid, 0);
 }
 
 static struct perf_fd_state *find_perf_fd(pid_t owner_tgid, int fd)
@@ -635,7 +648,10 @@ static struct perf_fd_state *find_perf_fd(pid_t owner_tgid, int fd)
     int i;
 
     for (i = 0; i < PERF_FD_SLOTS; i++) {
-        if (perf_fds[i].valid && perf_fds[i].owner_tgid == owner_tgid && perf_fds[i].fd == fd) return &perf_fds[i];
+        if (smp_load_acquire(&perf_fds[i].valid) &&
+            READ_ONCE(perf_fds[i].owner_tgid) == owner_tgid &&
+            READ_ONCE(perf_fds[i].fd) == fd)
+            return &perf_fds[i];
     }
     return 0;
 }
@@ -644,7 +660,8 @@ static void remove_perf_fd(pid_t owner_tgid, int fd)
 {
     struct perf_fd_state *state = find_perf_fd(owner_tgid, fd);
 
-    if (state) state->valid = 0;
+    if (state)
+        smp_store_release(&state->valid, 0);
 }
 
 static void track_perf_fd(int fd, pid_t owner_pid, pid_t owner_tgid, pid_t target_pid, long cpu, long group_fd,
@@ -664,7 +681,7 @@ static void track_perf_fd(int fd, pid_t owner_pid, pid_t owner_tgid, pid_t targe
     }
     if (!state) return;
 
-    state->valid = 1;
+    smp_store_release(&state->valid, 0);
     state->fd = fd;
     state->owner_pid = owner_pid;
     state->owner_tgid = owner_tgid;
@@ -675,6 +692,7 @@ static void track_perf_fd(int fd, pid_t owner_pid, pid_t owner_tgid, pid_t targe
     state->bp_type = bp_type;
     state->bp_addr = bp_addr;
     state->bp_len = bp_len;
+    smp_store_release(&state->valid, 1);
 }
 
 static void log_hwdebug_slots(pid_t tracer_pid, pid_t target_pid, int regset, const char *phase,
@@ -725,11 +743,21 @@ static void read_current_identity(char *comm, int comm_len, char *cmdline, int c
 
 static int current_matches_target(char *comm, int comm_len, char *cmdline, int cmdline_len)
 {
+    pid_t tgid;
+
     read_current_identity(comm, comm_len, cmdline, cmdline_len);
 
-    if (cmdline[0] && (local_streq(cmdline, target_name) || local_starts_with(cmdline, target_name))) return 1;
-    if (comm[0] && (local_streq(comm, target_name) || local_starts_with(comm, target_name))) return 1;
-    return 0;
+    if (!(cmdline[0] && (local_streq(cmdline, target_name) ||
+                         local_starts_with(cmdline, target_name))) &&
+        !(comm[0] && (local_streq(comm, target_name) ||
+                      local_starts_with(comm, target_name))))
+        return 0;
+
+    tgid = task_pid_nr_ns_fn ?
+        task_pid_nr_ns_fn(current, PIDTYPE_TGID, 0) : -1;
+    if (tgid > 0)
+        WRITE_ONCE(target_tgid_hint, tgid);
+    return 1;
 }
 
 static pid_t current_pid(void)
@@ -743,6 +771,71 @@ static pid_t current_tgid(void)
     if (task_pid_nr_ns_fn) return task_pid_nr_ns_fn(current, PIDTYPE_TGID, 0);
     return -1;
 }
+
+static int fast_current_matches_target(void)
+{
+    struct task_struct *leader;
+    pid_t tgid;
+    int i;
+
+    tgid = current_tgid();
+    if (tgid > 0 && tgid == READ_ONCE(target_tgid_hint))
+        return 1;
+
+    leader = READ_ONCE(current->group_leader);
+    if (!leader)
+        return 0;
+
+    for (i = 0; i < TASK_COMM_LEN - 1 && target_name[i]; i++) {
+        if (READ_ONCE(leader->comm[i]) != target_name[i])
+            return 0;
+    }
+    return i > 0;
+}
+
+bool shadow_syscall_should_intercept(int nr, int compat,
+                                     const struct pt_regs *regs)
+{
+    pid_t pid;
+    pid_t tgid;
+    int fd;
+
+    if (!regs)
+        return false;
+
+    fd = (int)regs->regs[0];
+    tgid = current_tgid();
+
+    /* Ptrace is low volume and seeds the exact TGID cache after full matching. */
+    if ((!compat && nr == __NR_ptrace) ||
+        (compat && nr == COMPAT_NR_PTRACE))
+        return true;
+
+    if ((!compat && (nr == __NR_read || nr == __NR_close ||
+                     nr == __NR_ioctl)) ||
+        (compat && (nr == COMPAT_NR_READ || nr == COMPAT_NR_CLOSE ||
+                    nr == COMPAT_NR_IOCTL))) {
+        if (tgid < 0)
+            return false;
+        return find_status_fd(tgid, fd) || find_perf_fd(tgid, fd);
+    }
+
+    if ((!compat && nr == __NR_wait4) ||
+        (compat && nr == COMPAT_NR_WAIT4)) {
+        pid = current_pid();
+        if (pid < 0)
+            return false;
+        return find_wait_session(pid, (pid_t)regs->regs[0]) != NULL;
+    }
+
+    if ((!compat && (nr == __NR_perf_event_open || nr == __NR_openat)) ||
+        (compat && (nr == COMPAT_NR_PERF_EVENT_OPEN ||
+                    nr == COMPAT_NR_OPENAT)))
+        return fast_current_matches_target();
+
+    return false;
+}
+NOKPROBE_SYMBOL(shadow_syscall_should_intercept);
 
 static int local_is_digit(char c)
 {
@@ -813,7 +906,8 @@ static void clear_all_status_fds(void)
 {
     int i;
 
-    for (i = 0; i < STATUS_FD_SLOTS; i++) status_fds[i].valid = 0;
+    for (i = 0; i < STATUS_FD_SLOTS; i++)
+        smp_store_release(&status_fds[i].valid, 0);
     for (i = 0; i < STATUS_OPEN_SLOTS; i++) status_open_pending[i].valid = 0;
     status_fd_active_count = 0;
     status_open_next = 0;
@@ -824,7 +918,10 @@ static struct status_fd_state *find_status_fd(pid_t owner_tgid, int fd)
     int i;
 
     for (i = 0; i < STATUS_FD_SLOTS; i++) {
-        if (status_fds[i].valid && status_fds[i].owner_tgid == owner_tgid && status_fds[i].fd == fd) return &status_fds[i];
+        if (smp_load_acquire(&status_fds[i].valid) &&
+            READ_ONCE(status_fds[i].owner_tgid) == owner_tgid &&
+            READ_ONCE(status_fds[i].fd) == fd)
+            return &status_fds[i];
     }
     return 0;
 }
@@ -834,7 +931,7 @@ static void remove_status_fd(pid_t owner_tgid, int fd)
     struct status_fd_state *state = find_status_fd(owner_tgid, fd);
 
     if (!state) return;
-    state->valid = 0;
+    smp_store_release(&state->valid, 0);
     if (status_fd_active_count > 0) status_fd_active_count--;
 }
 
@@ -859,11 +956,12 @@ static void track_status_fd(int fd, pid_t owner_tgid, pid_t target_pid, const ch
         status_fd_active_count++;
     }
 
-    state->valid = 1;
+    smp_store_release(&state->valid, 0);
     state->fd = fd;
     state->owner_tgid = owner_tgid;
     state->target_pid = target_pid;
     local_copy(state->path, sizeof(state->path), path);
+    smp_store_release(&state->valid, 1);
 }
 
 static int alloc_status_open_pending(pid_t owner_pid, pid_t owner_tgid, pid_t target_pid, unsigned long long dfd,
@@ -1626,12 +1724,13 @@ static void appendf(char *buf, int outlen, int *len, const char *fmt, ...)
 static void append_status(char *buf, int outlen, int *len)
 {
     appendf(buf, outlen, len,
-            "shadow-ptrace-hwdebug target=\"%s\" get_cmdline=%d task_pid=%d read_mode=physical write_mode=physical phys_deps=shared\n"
+            "shadow-ptrace-hwdebug target=\"%s\" target_tgid=%d get_cmdline=%d task_pid=%d hook_gate=target+tracked-fd read_mode=physical write_mode=physical phys_deps=shared\n"
             "seen=%llu matched=%llu unmatched=%llu faked=%llu stateful_faked=%llu reads=%llu writes=%llu wait4_seen=%llu wait4_faked=%llu phys_failures=%llu shadows=%d sessions=%d\n"
             "perf seen=%llu matched=%llu unmatched=%llu breakpoints=%llu unmatched_breakpoints=%llu blocked=%llu fd_events=%llu fd_slots=%d\n"
             "proc_status open_seen=%llu open_tracked=%llu read_seen=%llu read_faked=%llu close_tracked=%llu fd_active=%d fd_slots=%d\n"
             "hooks native_ptrace=%d compat_ptrace=%d native_perf=%d compat_perf=%d native_ioctl=%d compat_ioctl=%d native_openat=%d compat_openat=%d native_read=%d compat_read=%d native_close=%d compat_close=%d native_wait4=%d compat_wait4=%d\n",
-            target_name, get_cmdline_fn != 0, task_pid_nr_ns_fn != 0,
+            target_name, READ_ONCE(target_tgid_hint), get_cmdline_fn != 0,
+            task_pid_nr_ns_fn != 0,
             ptrace_seen, ptrace_matched,
             ptrace_unmatched, ptrace_faked, stateful_faked, regset_reads, regset_writes, wait4_seen, wait4_faked,
             phys_failures, SHADOW_SLOTS, SESSION_SLOTS,
@@ -1657,6 +1756,7 @@ long shadow_init(const char *args, const char *event, void *__user reserved)
     clear_all_sessions();
     clear_all_perf_fds();
     clear_all_status_fds();
+    target_tgid_hint = 0;
     log_seq = 0;
     ptrace_seen = 0;
     ptrace_matched = 0;
@@ -1804,6 +1904,7 @@ long shadow_control(const char *args, char *__user out_msg, int outlen)
         clear_all_sessions();
         clear_all_perf_fds();
         clear_all_status_fds();
+        target_tgid_hint = 0;
         ptrace_seen = 0;
         ptrace_matched = 0;
         ptrace_unmatched = 0;
