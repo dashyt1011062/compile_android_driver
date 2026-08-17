@@ -15,10 +15,10 @@ kade:
       target_arch: "aarch64"
 
       driver:
-        project_name: "file_copy"
+        project_name: "wujishadow"
         in_tree: false
         external_src_dir: "${GITHUB_WORKSPACE}/code"
-        module_name: "file_copy.ko"
+        module_name: "wujishadow.ko"
         overwrite: true
 
       # optional: Bazel args for >13
