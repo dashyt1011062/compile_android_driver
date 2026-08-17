@@ -1,0 +1,19 @@
+load("@kleaf//build/kernel/kleaf:kernel.bzl", "ddk_module")
+
+package(default_visibility = ["//visibility:public"])
+
+ddk_module(
+    name = "wujishadow",
+    out = "wujishadow.ko",
+    kernel_build = "@gki_prebuilts//kernel_aarch64",
+    srcs = [
+        "shadow_ptrace_hwdebug.c",
+        "wuji_hwbp.c",
+        "wujishadow_compat.h",
+        "wujishadow_entry.c",
+        "wujishadow_hooks.c",
+    ],
+    # wujishadow_entry.c includes this file so that the requested public
+    # source name can coexist with a multi-object wujishadow.ko.
+    textual_hdrs = ["wujishadow.c"],
+)

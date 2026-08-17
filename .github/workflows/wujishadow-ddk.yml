@@ -1,0 +1,139 @@
+name: Fast build wujishadow with Android 15 6.6 DDK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wujishadow-android15-6.6-ddk
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DEVKIT_TAG: android15-6.6-aarch64-devkit
+      DEVKIT_SHA256: 3864e6af50ecdfabb1a6bb6b74c8eacb8413c7feacd219c67d9ff435119276d2
+      DEVKIT_CACHE: ${{ github.workspace }}/.cache/kernel-devkit
+      DDK_WORKSPACE: ${{ github.workspace }}/.ddk
+      BAZEL_DISK_CACHE: ${{ github.workspace }}/.cache/bazel
+      MODULE_OUTPUT: ${{ github.workspace }}/wujishadow-output
+
+    steps:
+      - name: Checkout module source
+        uses: actions/checkout@v4
+
+      - name: Install DDK bootstrap dependencies
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y git git-lfs kmod rsync unzip zstd
+          sudo curl -fsSL \
+            https://storage.googleapis.com/git-repo-downloads/repo \
+            -o /usr/local/bin/repo
+          sudo chmod 0755 /usr/local/bin/repo
+          repo version
+
+      - name: Restore development package
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEVKIT_CACHE }}
+          key: android15-6.6-aarch64-devkit-${{ env.DEVKIT_SHA256 }}
+
+      - name: Download pinned development package release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          mkdir -p "${DEVKIT_CACHE}"
+          archive="${DEVKIT_CACHE}/android15-6.6-aarch64-devkit.tar.zst"
+          checksum="${archive}.sha256"
+          if [[ ! -f "${archive}" || ! -f "${checksum}" ]]; then
+            gh release download "${DEVKIT_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --dir "${DEVKIT_CACHE}" \
+              --pattern 'android15-6.6-aarch64-devkit.tar.zst*'
+          fi
+          (
+            cd "${DEVKIT_CACHE}"
+            sha256sum -c "$(basename "${checksum}")"
+          )
+          echo "${DEVKIT_SHA256}  ${archive}" | sha256sum -c -
+
+      - name: Restore pinned Kleaf tool projects
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.DDK_WORKSPACE }}/.repo
+            ${{ env.DDK_WORKSPACE }}/external
+          key: android15-6.6-kleaf-tools-${{ env.DEVKIT_SHA256 }}
+
+      - name: Restore Bazel module cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.BAZEL_DISK_CACHE }}
+          key: wujishadow-bazel-${{ runner.os }}-${{ env.DEVKIT_SHA256 }}-${{ hashFiles('code/**') }}
+          restore-keys: |
+            wujishadow-bazel-${{ runner.os }}-${{ env.DEVKIT_SHA256 }}-
+
+      - name: Initialize DDK workspace
+        run: |
+          set -eux
+          bash "${GITHUB_WORKSPACE}/.github/scripts/init_wujishadow_ddk.sh" \
+            "${DEVKIT_CACHE}/android15-6.6-aarch64-devkit.tar.zst" \
+            "${DDK_WORKSPACE}" \
+            "${GITHUB_WORKSPACE}/code"
+
+      - name: Build wujishadow.ko only
+        run: |
+          set -eux
+          mkdir -p "${BAZEL_DISK_CACHE}"
+          cd "${DDK_WORKSPACE}"
+          tools/bazel build \
+            --config=fast \
+            --disk_cache="${BAZEL_DISK_CACHE}" \
+            //wujishadow:wujishadow
+
+      - name: Collect and inspect module
+        run: |
+          set -eux
+          module=$(find "${DDK_WORKSPACE}/bazel-bin/wujishadow" \
+            -type f -name wujishadow.ko -print -quit)
+          if [[ -z "${module}" ]]; then
+            echo "wujishadow.ko was not produced" >&2
+            exit 1
+          fi
+          mkdir -p "${MODULE_OUTPUT}"
+          cp "${module}" "${MODULE_OUTPUT}/wujishadow.ko"
+          find "${DDK_WORKSPACE}/bazel-bin/wujishadow" \
+            -type f -name '*Module.symvers' \
+            -exec cp '{}' "${MODULE_OUTPUT}/" ';'
+          file "${MODULE_OUTPUT}/wujishadow.ko" \
+            | tee "${MODULE_OUTPUT}/file.txt"
+          modinfo "${MODULE_OUTPUT}/wujishadow.ko" \
+            | tee "${MODULE_OUTPUT}/modinfo.txt"
+          sha256sum "${MODULE_OUTPUT}/wujishadow.ko" \
+            | tee "${MODULE_OUTPUT}/wujishadow.ko.sha256"
+
+      - name: Upload wujishadow module
+        uses: actions/upload-artifact@v4
+        with:
+          name: wujishadow-android15-6.6-${{ github.run_number }}
+          path: ${{ env.MODULE_OUTPUT }}/**
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Bazel failure details
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wujishadow-ddk-failure-${{ github.run_number }}
+          path: |
+            ${{ env.DDK_WORKSPACE }}/bazel-testlogs/**
+            ${{ env.DDK_WORKSPACE }}/MODULE.bazel
+            ${{ env.DDK_WORKSPACE }}/device.bazelrc
+          if-no-files-found: warn
+          retention-days: 14
