@@ -1,6 +1,7 @@
 project:
   name: "ci-kade"                  # lyenv project name
   plugin: "kade"                   # plugin name
+  plugin_source: "../_kade-plugin-center/plugins/kade"
 
 # kade base config (overrides merged into kade plugin config.yaml)
 kade:

@@ -29,6 +29,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y make git curl python3 python3-pip
 
+      - name: Checkout kade plugin source
+        uses: actions/checkout@v4
+        with:
+          repository: systemnb/lyenv-plugin-center
+          ref: f24571af839a32f360593d13676336a4132b4966
+          path: _kade-plugin-center
+          sparse-checkout: |
+            plugins/kade
+          sparse-checkout-cone: true
+
       - name: Cache (LYENV_HOME caches)
         uses: actions/cache@v4
         with:
@@ -87,4 +97,3 @@ jobs:
             # Caller directory outputs (if you used --out relative to repo)
             ${{ github.workspace }}/img_out/**
           if-no-files-found: warn
-
